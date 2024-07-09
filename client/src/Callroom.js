@@ -1,92 +1,99 @@
-// src/CallRoom.js
-import React, { useEffect, useRef, useState } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import io from "socket.io-client";
-import SimplePeer from "simple-peer";
 
 const socket = io("http://localhost:5000");
 
-const CallRoom = () => {
-  const [peers, setPeers] = useState([]);
-  const [isMuted, setIsMuted] = useState(false);
-  const userVideo = useRef();
-  const peersRef = useRef([]);
-  const userStream = useRef();
+const Callroom = () => {
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
+  const peerConnectionRef = useRef(null);
+
+  const [isCaller, setIsCaller] = useState(false);
 
   useEffect(() => {
-    socket.emit("join", "room1");
+    socket.on("offer", async (data) => {
+      const pc = createPeerConnection();
+      peerConnectionRef.current = pc;
 
-    navigator.mediaDevices
-      .getUserMedia({ audio: true, video: false })
-      .then((stream) => {
-        userStream.current = stream;
-        userVideo.current.srcObject = stream;
-        socket.on("new-user", (userId) => {
-          const peer = createPeer(userId, socket.id, stream);
-          peersRef.current.push({
-            peerID: userId,
-            peer,
-          });
-          setPeers((users) => [...users, peer]);
-        });
-
-        socket.on("signal", (data) => {
-          const item = peersRef.current.find((p) => p.peerID === data.from);
-          item.peer.signal(data.signal);
-        });
+      await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+      const localStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
       });
+      localStreamRef.current.srcObject = localStream;
+      localStream
+        .getTracks()
+        .forEach((track) => pc.addTrack(track, localStream));
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      socket.emit("answer", { answer });
+    });
+
+    socket.on("answer", async (data) => {
+      await peerConnectionRef.current.setRemoteDescription(
+        new RTCSessionDescription(data.answer)
+      );
+    });
+
+    socket.on("candidate", async (data) => {
+      if (data.candidate) {
+        await peerConnectionRef.current.addIceCandidate(
+          new RTCIceCandidate(data.candidate)
+        );
+      }
+    });
 
     return () => {
-      socket.emit("leave", "room1");
-      socket.disconnect();
+      socket.off("offer");
+      socket.off("answer");
+      socket.off("candidate");
     };
   }, []);
 
-  function createPeer(userToSignal, callerID, stream) {
-    const peer = new SimplePeer({
-      initiator: true,
-      trickle: false,
-      stream,
+  const createPeerConnection = () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
 
-    peer.on("signal", (signal) => {
-      socket.emit("signal", {
-        signal,
-        to: userToSignal,
-        from: callerID,
-        room: "room1",
-      });
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit("candidate", { candidate: event.candidate });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      remoteStreamRef.current.srcObject = event.streams[0];
+    };
+
+    return pc;
+  };
+
+  const startCall = async () => {
+    setIsCaller(true);
+    const localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
     });
+    localStreamRef.current.srcObject = localStream;
 
-    return peer;
-  }
+    const pc = createPeerConnection();
+    peerConnectionRef.current = pc;
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
-  const toggleMute = () => {
-    const enabled = userStream.current.getAudioTracks()[0].enabled;
-    userStream.current.getAudioTracks()[0].enabled = !enabled;
-    setIsMuted(!enabled);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socket.emit("offer", { offer });
   };
 
   return (
     <div>
-      <audio ref={userVideo} autoPlay playsInline />
-      {peers.map((peer, index) => (
-        <Audio key={index} peer={peer} />
-      ))}
-      <button onClick={toggleMute}>{isMuted ? "Unmute" : "Mute"}</button>
+      <h1>Voice Call</h1>
+      <button onClick={startCall}>Start Call</button>
+      <audio ref={localStreamRef} autoPlay muted></audio>
+      <audio ref={remoteStreamRef} autoPlay></audio>
     </div>
   );
 };
 
-const Audio = ({ peer }) => {
-  const ref = useRef();
-
-  useEffect(() => {
-    peer.on("stream", (stream) => {
-      ref.current.srcObject = stream;
-    });
-  }, [peer]);
-
-  return <audio ref={ref} autoPlay playsInline />;
-};
-
-export default CallRoom;
+export default Callroom;
